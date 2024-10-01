@@ -2,7 +2,7 @@ use cosmwasm_std::{to_json_binary, Addr, Empty, Event};
 use cw721::msg::{Cw721ExecuteMsg, Cw721QueryMsg, OwnerOfResponse};
 use cw_multi_test::{App, ContractWrapper, Executor};
 use my_collection_manager::{
-    contract::{execute, instantiate},
+    contract::{execute, instantiate, reply},
     msg::{ExecuteMsg, InstantiateMsg},
 };
 use my_nameservice::{
@@ -46,9 +46,12 @@ fn instantiate_nameservice(mock_app: &mut App, minter: String) -> (u64, Addr) {
 }
 
 fn instantiate_collection_manager(mock_app: &mut App) -> (u64, Addr) {
-    let code = Box::new(ContractWrapper::new(execute, instantiate, |_, _, _: ()| {
-        to_json_binary("mocked_manager_query")
-    }));
+    let code = Box::new(
+        ContractWrapper::new(execute, instantiate, |_, _, _: ()| {
+            to_json_binary("mocked_manager_query")
+        })
+        .with_reply(reply),
+    );
     let manager_code_id = mock_app.store_code(code);
 
     return (
@@ -104,6 +107,9 @@ fn test_mint_through() {
     result.assert_event(&expected_cw721_event);
     let expected_manager_event =
         Event::new("wasm-my-collection-manager").add_attribute("token-count-before", "0");
+    result.assert_event(&expected_manager_event);
+    let expected_manager_event =
+        Event::new("wasm-my-collection-manager").add_attribute("token-count-after", "1");
     result.assert_event(&expected_manager_event);
     let owner_query = CollectionQueryMsg::OwnerOf {
         token_id: name_alice.to_string(),
@@ -181,6 +187,9 @@ fn test_mint_num_tokens() {
     result.assert_event(&expected_cw721_event);
     let expected_manager_event =
         Event::new("wasm-my-collection-manager").add_attribute("token-count-before", "1");
+    result.assert_event(&expected_manager_event);
+    let expected_manager_event =
+        Event::new("wasm-my-collection-manager").add_attribute("token-count-after", "2");
     result.assert_event(&expected_manager_event);
     assert_eq!(
         mock_app

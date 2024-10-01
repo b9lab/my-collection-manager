@@ -15,3 +15,8 @@ pub enum ExecuteMsg {
         message: CollectionExecuteMsg,
     },
 }
+
+#[cw_serde]
+pub struct NameServiceExecuteMsgResponse {
+    pub num_tokens: u64,
+}

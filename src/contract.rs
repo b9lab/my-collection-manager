@@ -1,15 +1,34 @@
 use crate::{
     error::ContractError,
-    msg::{CollectionExecuteMsg, CollectionQueryMsg, ExecuteMsg, InstantiateMsg},
+    msg::{
+        CollectionExecuteMsg, CollectionQueryMsg, ExecuteMsg, InstantiateMsg,
+        NameServiceExecuteMsgResponse,
+    },
 };
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
 use cosmwasm_std::{
-    to_json_binary, DepsMut, Env, Event, MessageInfo, QueryRequest, Response, WasmMsg, WasmQuery,
+    from_json, to_json_binary, CosmosMsg, DepsMut, Empty, Env, Event, MessageInfo, QueryRequest,
+    Reply, ReplyOn, Response, StdError, SubMsg, WasmMsg, WasmQuery,
 };
 use cw721::msg::NumTokensResponse;
 
 type ContractResult = Result<Response, ContractError>;
+
+enum ReplyCode {
+    PassThrough = 1,
+}
+
+impl TryFrom<u64> for ReplyCode {
+    type Error = ContractError;
+
+    fn try_from(item: u64) -> Result<Self, Self::Error> {
+        match item {
+            1 => Ok(ReplyCode::PassThrough),
+            _ => panic!("invalid ReplyCode({})", item),
+        }
+    }
+}
 
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn instantiate(_: DepsMut, _: Env, _: MessageInfo, _: InstantiateMsg) -> ContractResult {
@@ -38,6 +57,12 @@ fn execute_pass_through(
         msg: to_json_binary(&message)?,
         funds: info.funds,
     };
+    let onward_sub_msg = SubMsg {
+        id: ReplyCode::PassThrough as u64,
+        msg: CosmosMsg::<Empty>::Wasm(onward_exec_msg),
+        reply_on: ReplyOn::Success,
+        gas_limit: None,
+    };
     let token_count_result =
         deps.querier
             .query::<NumTokensResponse>(&QueryRequest::Wasm(WasmQuery::Smart {
@@ -47,19 +72,48 @@ fn execute_pass_through(
     let token_count_event = Event::new("my-collection-manager")
         .add_attribute("token-count-before", token_count_result?.count.to_string());
     Ok(Response::default()
-        .add_message(onward_exec_msg)
+        .add_submessage(onward_sub_msg)
         .add_event(token_count_event))
+}
+
+#[cfg_attr(not(feature = "library"), entry_point)]
+pub fn reply(deps: DepsMut, env: Env, msg: Reply) -> ContractResult {
+    match ReplyCode::try_from(msg.id)? {
+        ReplyCode::PassThrough => reply_pass_through(deps, env, msg),
+    }
+}
+
+fn reply_pass_through(_deps: DepsMut, _env: Env, msg: Reply) -> ContractResult {
+    let resp = msg.result.into_result().map_err(StdError::generic_err)?;
+    let data = if let Some(data) = resp.data {
+        data.0[2..].to_vec()
+    } else {
+        return Ok(Response::default());
+    };
+    let value = if let Ok(value) = from_json::<NameServiceExecuteMsgResponse>(data) {
+        value
+    } else {
+        return Ok(Response::default());
+    };
+    let event = Event::new("my-collection-manager")
+        .add_attribute("token-count-after", value.num_tokens.to_string());
+    Ok(Response::default().add_event(event))
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::msg::{CollectionExecuteMsg, CollectionQueryMsg, ExecuteMsg};
+    use crate::{
+        contract::ReplyCode,
+        msg::{
+            CollectionExecuteMsg, CollectionQueryMsg, ExecuteMsg, NameServiceExecuteMsgResponse,
+        },
+    };
     use cosmwasm_std::{
         from_json,
         testing::{self, MockApi, MockQuerier, MockStorage},
-        to_json_binary, Addr, Coin, ContractResult, Empty, Event, OwnedDeps, Querier,
-        QuerierResult, QueryRequest, Response, SystemError, SystemResult, Uint128, WasmMsg,
-        WasmQuery,
+        to_json_binary, Addr, Binary, Coin, ContractResult, CosmosMsg, Empty, Event, OwnedDeps,
+        Querier, QuerierResult, QueryRequest, Reply, ReplyOn, Response, SubMsg, SubMsgResponse,
+        SubMsgResult, SystemError, SystemResult, Uint128, WasmMsg, WasmQuery,
     };
     use cw721::msg::NumTokensResponse;
     use std::marker::PhantomData;
@@ -156,14 +210,47 @@ mod tests {
         assert!(contract_result.is_ok(), "Failed to pass message through");
         let received_response = contract_result.unwrap();
         let expected_response = Response::default()
-            .add_message(WasmMsg::Execute {
-                contract_addr: "collection".to_owned(),
-                msg: to_json_binary(&inner_msg).expect("Failed to serialize inner message"),
-                funds: vec![fund_sent],
+            .add_submessage(SubMsg {
+                id: ReplyCode::PassThrough as u64,
+                msg: CosmosMsg::<Empty>::Wasm(WasmMsg::Execute {
+                    contract_addr: "collection".to_owned(),
+                    msg: to_json_binary(&inner_msg).expect("Failed to serialize inner message"),
+                    funds: vec![fund_sent],
+                }),
+                reply_on: ReplyOn::Success,
+                gas_limit: None,
             })
             .add_event(
                 Event::new("my-collection-manager").add_attribute("token-count-before", "3"),
             );
+        assert_eq!(received_response, expected_response);
+    }
+
+    #[test]
+    fn test_reply_pass_through() {
+        // Arrange
+        let mut mocked_deps_mut = mock_deps(NumTokensResponse { count: 3 });
+        let mocked_env = testing::mock_env();
+        let num_tokens = to_json_binary(&NameServiceExecuteMsgResponse { num_tokens: 4 })
+            .expect("Failed to serialize counter");
+        let mut prefixed_num_tokens = vec![10, 16];
+        prefixed_num_tokens.extend_from_slice(&num_tokens.as_slice());
+        let reply = Reply {
+            id: ReplyCode::PassThrough as u64,
+            result: SubMsgResult::Ok(SubMsgResponse {
+                data: Some(Binary::from(prefixed_num_tokens)),
+                events: vec![],
+            }),
+        };
+
+        // Act
+        let contract_result = super::reply(mocked_deps_mut.as_mut(), mocked_env, reply);
+
+        // Assert
+        assert!(contract_result.is_ok(), "Failed to pass reply through");
+        let received_response = contract_result.unwrap();
+        let expected_response = Response::default()
+            .add_event(Event::new("my-collection-manager").add_attribute("token-count-after", "4"));
         assert_eq!(received_response, expected_response);
     }
 }
