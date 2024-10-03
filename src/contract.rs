@@ -4,12 +4,13 @@ use crate::{
         CollectionExecuteMsg, CollectionQueryMsg, ExecuteMsg, InstantiateMsg,
         NameServiceExecuteMsgResponse,
     },
+    state::PAYMENT_PARAMS,
 };
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
 use cosmwasm_std::{
-    from_json, to_json_binary, CosmosMsg, DepsMut, Empty, Env, Event, MessageInfo, QueryRequest,
-    Reply, ReplyOn, Response, StdError, SubMsg, WasmMsg, WasmQuery,
+    from_json, to_json_binary, BankMsg, CosmosMsg, DepsMut, Empty, Env, Event, MessageInfo,
+    QueryRequest, Reply, ReplyOn, Response, StdError, SubMsg, WasmMsg, WasmQuery,
 };
 use cw721::msg::NumTokensResponse;
 
@@ -31,7 +32,8 @@ impl TryFrom<u64> for ReplyCode {
 }
 
 #[cfg_attr(not(feature = "library"), entry_point)]
-pub fn instantiate(_: DepsMut, _: Env, _: MessageInfo, _: InstantiateMsg) -> ContractResult {
+pub fn instantiate(deps: DepsMut, _: Env, _: MessageInfo, msg: InstantiateMsg) -> ContractResult {
+    PAYMENT_PARAMS.save(deps.storage, &msg.payment_params)?;
     Ok(Response::default())
 }
 
@@ -52,10 +54,21 @@ fn execute_pass_through(
     collection: String,
     message: CollectionExecuteMsg,
 ) -> ContractResult {
+    let response = Response::default();
+    let response = if !info.funds.is_empty() {
+        let payment_params = PAYMENT_PARAMS.load(deps.storage)?;
+        let forward_funds_msg = BankMsg::Send {
+            to_address: payment_params.beneficiary.to_string(),
+            amount: info.funds,
+        };
+        response.add_message(forward_funds_msg)
+    } else {
+        response
+    };
     let onward_exec_msg = WasmMsg::Execute {
         contract_addr: collection.to_owned(),
         msg: to_json_binary(&message)?,
-        funds: info.funds,
+        funds: vec![],
     };
     let onward_sub_msg = SubMsg {
         id: ReplyCode::PassThrough as u64,
@@ -71,7 +84,7 @@ fn execute_pass_through(
             }));
     let token_count_event = Event::new("my-collection-manager")
         .add_attribute("token-count-before", token_count_result?.count.to_string());
-    Ok(Response::default()
+    Ok(response
         .add_submessage(onward_sub_msg)
         .add_event(token_count_event))
 }
@@ -105,15 +118,16 @@ mod tests {
     use crate::{
         contract::ReplyCode,
         msg::{
-            CollectionExecuteMsg, CollectionQueryMsg, ExecuteMsg, NameServiceExecuteMsgResponse,
+            CollectionExecuteMsg, CollectionQueryMsg, ExecuteMsg, InstantiateMsg,
+            NameServiceExecuteMsgResponse, PaymentParams,
         },
     };
     use cosmwasm_std::{
         from_json,
         testing::{self, MockApi, MockQuerier, MockStorage},
-        to_json_binary, Addr, Binary, Coin, ContractResult, CosmosMsg, Empty, Event, OwnedDeps,
-        Querier, QuerierResult, QueryRequest, Reply, ReplyOn, Response, SubMsg, SubMsgResponse,
-        SubMsgResult, SystemError, SystemResult, Uint128, WasmMsg, WasmQuery,
+        to_json_binary, Addr, BankMsg, Binary, Coin, ContractResult, CosmosMsg, Empty, Event,
+        OwnedDeps, Querier, QuerierResult, QueryRequest, Reply, ReplyOn, Response, SubMsg,
+        SubMsgResponse, SubMsgResult, SystemError, SystemResult, Uint128, WasmMsg, WasmQuery,
     };
     use cw721::msg::NumTokensResponse;
     use std::marker::PhantomData;
@@ -179,6 +193,20 @@ mod tests {
         // Arrange
         let mut mocked_deps_mut = mock_deps(NumTokensResponse { count: 3 });
         let mocked_env = testing::mock_env();
+        let deployer = Addr::unchecked("deployer");
+        let mocked_msg_info = testing::mock_info(&deployer.to_string(), &[]);
+        let instantiate_msg = InstantiateMsg {
+            payment_params: PaymentParams {
+                beneficiary: deployer.to_owned(),
+            },
+        };
+        let _ = super::instantiate(
+            mocked_deps_mut.as_mut(),
+            mocked_env.to_owned(),
+            mocked_msg_info,
+            instantiate_msg,
+        )
+        .expect("Failed to instantiate manager");
         let executer = Addr::unchecked("executer");
         let fund_sent = Coin {
             denom: "gold".to_owned(),
@@ -210,12 +238,16 @@ mod tests {
         assert!(contract_result.is_ok(), "Failed to pass message through");
         let received_response = contract_result.unwrap();
         let expected_response = Response::default()
+            .add_message(BankMsg::Send {
+                to_address: deployer.to_string(),
+                amount: vec![fund_sent],
+            })
             .add_submessage(SubMsg {
                 id: ReplyCode::PassThrough as u64,
                 msg: CosmosMsg::<Empty>::Wasm(WasmMsg::Execute {
                     contract_addr: "collection".to_owned(),
                     msg: to_json_binary(&inner_msg).expect("Failed to serialize inner message"),
-                    funds: vec![fund_sent],
+                    funds: vec![],
                 }),
                 reply_on: ReplyOn::Success,
                 gas_limit: None,

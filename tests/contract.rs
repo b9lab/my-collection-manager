@@ -1,9 +1,9 @@
-use cosmwasm_std::{to_json_binary, Addr, Empty, Event};
+use cosmwasm_std::{to_json_binary, Addr, Coin, Empty, Event, Uint128};
 use cw721::msg::{Cw721ExecuteMsg, Cw721QueryMsg, OwnerOfResponse};
-use cw_multi_test::{App, ContractWrapper, Executor};
+use cw_multi_test::{App, AppBuilder, ContractWrapper, Executor};
 use my_collection_manager::{
     contract::{execute, instantiate, reply},
-    msg::{ExecuteMsg, InstantiateMsg},
+    msg::{ExecuteMsg, InstantiateMsg, PaymentParams},
 };
 use my_nameservice::{
     contract::{
@@ -45,7 +45,10 @@ fn instantiate_nameservice(mock_app: &mut App, minter: String) -> (u64, Addr) {
     );
 }
 
-fn instantiate_collection_manager(mock_app: &mut App) -> (u64, Addr) {
+fn instantiate_collection_manager(
+    mock_app: &mut App,
+    payment_params: PaymentParams,
+) -> (u64, Addr) {
     let code = Box::new(
         ContractWrapper::new(execute, instantiate, |_, _, _: ()| {
             to_json_binary("mocked_manager_query")
@@ -60,7 +63,7 @@ fn instantiate_collection_manager(mock_app: &mut App) -> (u64, Addr) {
             .instantiate_contract(
                 manager_code_id,
                 Addr::unchecked("deployer-manager"),
-                &InstantiateMsg {},
+                &InstantiateMsg { payment_params },
                 &[],
                 "my-collection-manager",
                 None,
@@ -73,7 +76,13 @@ fn instantiate_collection_manager(mock_app: &mut App) -> (u64, Addr) {
 fn test_mint_through() {
     // Arrange
     let mut mock_app = App::default();
-    let (_, addr_manager) = instantiate_collection_manager(&mut mock_app);
+    let beneficiary_addr = Addr::unchecked("beneficiary");
+    let (_, addr_manager) = instantiate_collection_manager(
+        &mut mock_app,
+        PaymentParams {
+            beneficiary: beneficiary_addr.to_owned(),
+        },
+    );
     let (_, addr_collection) = instantiate_nameservice(&mut mock_app, addr_manager.to_string());
     let owner_addr = Addr::unchecked("owner");
     let name_alice = "alice".to_owned();
@@ -129,10 +138,100 @@ fn test_mint_through() {
 }
 
 #[test]
+fn test_paid_mint_through() {
+    // Arrange
+    let sender_addr = Addr::unchecked("sender");
+    let extra_fund_sent = Coin {
+        denom: "gold".to_owned(),
+        amount: Uint128::from(335u128),
+    };
+    let mut mock_app = AppBuilder::default().build(|router, _api, storage| {
+        router
+            .bank
+            .init_balance(
+                storage,
+                &sender_addr,
+                vec![extra_fund_sent.to_owned()],
+            )
+            .expect("Failed to init bank balances");
+    });
+    let beneficiary = Addr::unchecked("beneficiary");
+    let (_, addr_manager) = instantiate_collection_manager(
+        &mut mock_app,
+        PaymentParams {
+            beneficiary: beneficiary.to_owned(),
+        },
+    );
+    let (_, addr_collection) = instantiate_nameservice(&mut mock_app, addr_manager.to_string());
+    let owner_addr = Addr::unchecked("owner");
+    let name_alice = "alice".to_owned();
+    let register_msg = ExecuteMsg::PassThrough {
+        collection: addr_collection.to_string(),
+        message: CollectionExecuteMsg::Mint {
+            token_id: name_alice.clone(),
+            owner: owner_addr.to_string(),
+            token_uri: None,
+            extension: None,
+        },
+    };
+
+    // Act
+    let result = mock_app.execute_contract(
+        sender_addr.clone(),
+        addr_manager.clone(),
+        &register_msg,
+        &[extra_fund_sent.to_owned()],
+    );
+
+    // Assert
+    assert!(result.is_ok(), "Failed to pass through the message");
+    let result = result.unwrap();
+    let expected_beneficiary_bank_event = Event::new("transfer")
+        .add_attribute("recipient", "beneficiary")
+        .add_attribute("sender", "contract0")
+        .add_attribute("amount", "335gold");
+    result.assert_event(&expected_beneficiary_bank_event);
+    assert_eq!(
+        Vec::<Coin>::new(),
+        mock_app
+            .wrap()
+            .query_all_balances(sender_addr)
+            .expect("Failed to get sender balances")
+    );
+    assert_eq!(
+        vec![extra_fund_sent],
+        mock_app
+            .wrap()
+            .query_all_balances(beneficiary)
+            .expect("Failed to get beneficiary balances")
+    );
+    assert_eq!(
+        Vec::<Coin>::new(),
+        mock_app
+            .wrap()
+            .query_all_balances(addr_manager)
+            .expect("Failed to get manager balances")
+    );
+    assert_eq!(
+        Vec::<Coin>::new(),
+        mock_app
+            .wrap()
+            .query_all_balances(addr_collection)
+            .expect("Failed to get collection balances")
+    );
+}
+
+#[test]
 fn test_mint_num_tokens() {
     // Arrange
     let mut mock_app = App::default();
-    let (_, addr_manager) = instantiate_collection_manager(&mut mock_app);
+    let beneficiary_addr = Addr::unchecked("beneficiary");
+    let (_, addr_manager) = instantiate_collection_manager(
+        &mut mock_app,
+        PaymentParams {
+            beneficiary: beneficiary_addr.to_owned(),
+        },
+    );
     let (_, addr_collection) = instantiate_nameservice(&mut mock_app, addr_manager.to_string());
     let owner_addr = Addr::unchecked("owner");
     let name_alice = "alice".to_owned();
