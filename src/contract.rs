@@ -9,8 +9,8 @@ use crate::{
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
 use cosmwasm_std::{
-    from_json, to_json_binary, BankMsg, CosmosMsg, DepsMut, Empty, Env, Event, MessageInfo,
-    QueryRequest, Reply, ReplyOn, Response, StdError, SubMsg, WasmMsg, WasmQuery,
+    from_json, to_json_binary, BankMsg, Coin, CosmosMsg, DepsMut, Empty, Env, Event, MessageInfo,
+    QueryRequest, Reply, ReplyOn, Response, StdError, SubMsg, Uint128, WasmMsg, WasmQuery,
 };
 use cw721::msg::NumTokensResponse;
 
@@ -33,6 +33,7 @@ impl TryFrom<u64> for ReplyCode {
 
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn instantiate(deps: DepsMut, _: Env, _: MessageInfo, msg: InstantiateMsg) -> ContractResult {
+    msg.payment_params.validate()?;
     PAYMENT_PARAMS.save(deps.storage, &msg.payment_params)?;
     Ok(Response::default())
 }
@@ -55,15 +56,22 @@ fn execute_pass_through(
     message: CollectionExecuteMsg,
 ) -> ContractResult {
     let response = Response::default();
-    let response = if !info.funds.is_empty() {
-        let payment_params = PAYMENT_PARAMS.load(deps.storage)?;
-        let forward_funds_msg = BankMsg::Send {
-            to_address: payment_params.beneficiary.to_string(),
-            amount: info.funds,
-        };
-        response.add_message(forward_funds_msg)
-    } else {
-        response
+    let response = match message {
+        CollectionExecuteMsg::Mint { .. } => match handle_pre_mint_funds(&deps, &info) {
+            Err(err) => Err(err)?,
+            Ok(bank_msgs) => response.add_messages(bank_msgs),
+        },
+        _ => {
+            if !info.funds.is_empty() {
+                let refund_msg = BankMsg::Send {
+                    to_address: info.sender.to_string(),
+                    amount: info.funds,
+                };
+                response.add_message(refund_msg)
+            } else {
+                response
+            }
+        }
     };
     let onward_exec_msg = WasmMsg::Execute {
         contract_addr: collection.to_owned(),
@@ -87,6 +95,62 @@ fn execute_pass_through(
     Ok(response
         .add_submessage(onward_sub_msg)
         .add_event(token_count_event))
+}
+
+fn handle_pre_mint_funds(
+    deps: &DepsMut,
+    info: &MessageInfo,
+) -> Result<Vec<BankMsg>, ContractError> {
+    let payment_params = PAYMENT_PARAMS.load(deps.storage)?;
+    let (payment, change) = match payment_params.mint_price {
+        None => (None, info.funds.to_owned()),
+        Some(minting_price) if minting_price.amount.le(&Uint128::zero()) => {
+            Err(ContractError::ZeroPrice)?
+        }
+        Some(minting_price) => {
+            let (aggregated, mut others) = split_fund_denom(&minting_price.denom, &info.funds);
+            match aggregated.checked_sub(minting_price.amount) {
+                Err(_) => Err(ContractError::MissingPayment {
+                    missing_payment: minting_price.to_owned(),
+                })?,
+                Ok(change_in_denom) if change_in_denom.le(&Uint128::zero()) => {}
+                Ok(change_in_denom) => others.push(Coin {
+                    denom: minting_price.denom.clone(),
+                    amount: change_in_denom,
+                }),
+            };
+            (Some(minting_price), others)
+        }
+    };
+    let mut bank_msgs = Vec::<BankMsg>::new();
+    if let Some(paid) = payment {
+        bank_msgs.push(BankMsg::Send {
+            to_address: payment_params.beneficiary.to_string(),
+            amount: vec![paid],
+        });
+    }
+    if !change.is_empty() {
+        bank_msgs.push(BankMsg::Send {
+            to_address: info.sender.to_string(),
+            amount: change,
+        })
+    };
+    Ok(bank_msgs)
+}
+
+fn split_fund_denom(denom: &String, funds: &[Coin]) -> (Uint128, Vec<Coin>) {
+    let (amount, others) = funds.iter().fold(
+        (Uint128::zero(), Vec::with_capacity(funds.len())),
+        |(aggregated, mut others), fund| {
+            if &fund.denom == denom {
+                (aggregated.strict_add(fund.amount), others)
+            } else {
+                others.push(fund.clone());
+                (aggregated, others)
+            }
+        },
+    );
+    (amount, others)
 }
 
 #[cfg_attr(not(feature = "library"), entry_point)]
@@ -198,6 +262,7 @@ mod tests {
         let instantiate_msg = InstantiateMsg {
             payment_params: PaymentParams {
                 beneficiary: deployer.to_owned(),
+                mint_price: None,
             },
         };
         let _ = super::instantiate(
@@ -239,8 +304,103 @@ mod tests {
         let received_response = contract_result.unwrap();
         let expected_response = Response::default()
             .add_message(BankMsg::Send {
-                to_address: deployer.to_string(),
+                to_address: executer.to_string(),
                 amount: vec![fund_sent],
+            })
+            .add_submessage(SubMsg {
+                id: ReplyCode::PassThrough as u64,
+                msg: CosmosMsg::<Empty>::Wasm(WasmMsg::Execute {
+                    contract_addr: "collection".to_owned(),
+                    msg: to_json_binary(&inner_msg).expect("Failed to serialize inner message"),
+                    funds: vec![],
+                }),
+                reply_on: ReplyOn::Success,
+                gas_limit: None,
+            })
+            .add_event(
+                Event::new("my-collection-manager").add_attribute("token-count-before", "3"),
+            );
+        assert_eq!(received_response, expected_response);
+    }
+
+    #[test]
+    fn test_paid_mint_pass_through() {
+        // Arrange
+        let mut mocked_deps_mut = mock_deps(NumTokensResponse { count: 3 });
+        let mocked_env = testing::mock_env();
+        let beneficiary = Addr::unchecked("beneficiary");
+        let deployer = Addr::unchecked("deployer");
+        let mocked_msg_info = testing::mock_info(&deployer.to_string(), &[]);
+        let minting_price = Coin {
+            amount: Uint128::from(55u16),
+            denom: "silver".to_owned(),
+        };
+        let instantiate_msg = InstantiateMsg {
+            payment_params: PaymentParams {
+                beneficiary: beneficiary.to_owned(),
+                mint_price: Some(minting_price.to_owned()),
+            },
+        };
+        let _ = super::instantiate(
+            mocked_deps_mut.as_mut(),
+            mocked_env.to_owned(),
+            mocked_msg_info,
+            instantiate_msg,
+        )
+        .expect("Failed to instantiate manager");
+        let executer = Addr::unchecked("executer");
+        let extra_fund_sent = Coin {
+            denom: "gold".to_owned(),
+            amount: Uint128::from(335u128),
+        };
+        let fistful_silver = Coin {
+            amount: Uint128::from(30u16),
+            denom: "silver".to_owned(),
+        };
+        let mocked_msg_info = testing::mock_info(
+            &executer.to_string(),
+            &[
+                extra_fund_sent.to_owned(),
+                fistful_silver.to_owned(),
+                fistful_silver,
+            ],
+        );
+        let name = "alice".to_owned();
+        let owner = Addr::unchecked("owner");
+        let inner_msg = CollectionExecuteMsg::Mint {
+            token_id: name.to_owned(),
+            owner: owner.to_string(),
+            token_uri: None,
+            extension: None,
+        };
+        let execute_msg = ExecuteMsg::PassThrough {
+            collection: "collection".to_owned(),
+            message: inner_msg.to_owned(),
+        };
+
+        // Act
+        let contract_result = super::execute(
+            mocked_deps_mut.as_mut(),
+            mocked_env,
+            mocked_msg_info.to_owned(),
+            execute_msg,
+        );
+
+        // Assert
+        assert!(contract_result.is_ok(), "Failed to pass message through");
+        let received_response = contract_result.unwrap();
+        let expected_denom_change = Coin {
+            amount: Uint128::from(5u16),
+            denom: "silver".to_owned(),
+        };
+        let expected_response = Response::default()
+            .add_message(BankMsg::Send {
+                to_address: beneficiary.to_string(),
+                amount: vec![minting_price],
+            })
+            .add_message(BankMsg::Send {
+                to_address: mocked_msg_info.sender.to_string(),
+                amount: vec![extra_fund_sent, expected_denom_change],
             })
             .add_submessage(SubMsg {
                 id: ReplyCode::PassThrough as u64,

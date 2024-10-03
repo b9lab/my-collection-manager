@@ -1,6 +1,8 @@
 use cosmwasm_schema::cw_serde;
-use cosmwasm_std::{Addr, Empty};
+use cosmwasm_std::{Addr, Coin, Empty, Uint128};
 use cw721::msg::{Cw721ExecuteMsg, Cw721QueryMsg};
+
+use crate::error::ContractError;
 
 #[cw_serde]
 pub struct InstantiateMsg {
@@ -10,6 +12,16 @@ pub struct InstantiateMsg {
 #[cw_serde]
 pub struct PaymentParams {
     pub beneficiary: Addr,
+    pub mint_price: Option<Coin>,
+}
+
+impl PaymentParams {
+    pub fn validate(&self) -> Result<(), ContractError> {
+        match &self.mint_price {
+            Some(coin) if coin.amount.le(&Uint128::zero()) => Err(ContractError::ZeroPrice),
+            None | Some(_) => Ok(()),
+        }
+    }
 }
 
 pub type CollectionExecuteMsg = Cw721ExecuteMsg<Option<Empty>, Option<Empty>, Empty>;

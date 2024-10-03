@@ -81,6 +81,7 @@ fn test_mint_through() {
         &mut mock_app,
         PaymentParams {
             beneficiary: beneficiary_addr.to_owned(),
+            mint_price: None,
         },
     );
     let (_, addr_collection) = instantiate_nameservice(&mut mock_app, addr_manager.to_string());
@@ -141,17 +142,25 @@ fn test_mint_through() {
 fn test_paid_mint_through() {
     // Arrange
     let sender_addr = Addr::unchecked("sender");
+    let minting_price = Coin {
+        amount: Uint128::from(55u16),
+        denom: "silver".to_owned(),
+    };
     let extra_fund_sent = Coin {
         denom: "gold".to_owned(),
         amount: Uint128::from(335u128),
     };
     let mut mock_app = AppBuilder::default().build(|router, _api, storage| {
+        let original_silver = Coin {
+            amount: Uint128::from(60u16),
+            denom: "silver".to_owned(),
+        };
         router
             .bank
             .init_balance(
                 storage,
                 &sender_addr,
-                vec![extra_fund_sent.to_owned()],
+                vec![extra_fund_sent.to_owned(), original_silver],
             )
             .expect("Failed to init bank balances");
     });
@@ -160,6 +169,7 @@ fn test_paid_mint_through() {
         &mut mock_app,
         PaymentParams {
             beneficiary: beneficiary.to_owned(),
+            mint_price: Some(minting_price.to_owned()),
         },
     );
     let (_, addr_collection) = instantiate_nameservice(&mut mock_app, addr_manager.to_string());
@@ -174,13 +184,21 @@ fn test_paid_mint_through() {
             extension: None,
         },
     };
+    let half_silver = Coin {
+        amount: Uint128::from(30u16),
+        denom: "silver".to_owned(),
+    };
 
     // Act
     let result = mock_app.execute_contract(
         sender_addr.clone(),
         addr_manager.clone(),
         &register_msg,
-        &[extra_fund_sent.to_owned()],
+        &[
+            extra_fund_sent.to_owned(),
+            half_silver.to_owned(),
+            half_silver,
+        ],
     );
 
     // Assert
@@ -189,17 +207,26 @@ fn test_paid_mint_through() {
     let expected_beneficiary_bank_event = Event::new("transfer")
         .add_attribute("recipient", "beneficiary")
         .add_attribute("sender", "contract0")
-        .add_attribute("amount", "335gold");
+        .add_attribute("amount", "55silver");
     result.assert_event(&expected_beneficiary_bank_event);
+    let expected_sender_bank_event = Event::new("transfer")
+        .add_attribute("recipient", "sender")
+        .add_attribute("sender", "contract0")
+        .add_attribute("amount", "335gold,5silver");
+    result.assert_event(&expected_sender_bank_event);
+    let expected_silver_change = Coin {
+        amount: Uint128::from(5u16),
+        denom: "silver".to_owned(),
+    };
     assert_eq!(
-        Vec::<Coin>::new(),
+        vec![extra_fund_sent, expected_silver_change],
         mock_app
             .wrap()
             .query_all_balances(sender_addr)
             .expect("Failed to get sender balances")
     );
     assert_eq!(
-        vec![extra_fund_sent],
+        vec![minting_price],
         mock_app
             .wrap()
             .query_all_balances(beneficiary)
@@ -230,6 +257,7 @@ fn test_mint_num_tokens() {
         &mut mock_app,
         PaymentParams {
             beneficiary: beneficiary_addr.to_owned(),
+            mint_price: None,
         },
     );
     let (_, addr_collection) = instantiate_nameservice(&mut mock_app, addr_manager.to_string());
