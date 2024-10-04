@@ -1,9 +1,9 @@
 use cosmwasm_std::{Addr, Coin, Empty, Event, Uint128};
 use cw721::msg::{Cw721ExecuteMsg, Cw721QueryMsg, OwnerOfResponse};
-use cw_multi_test::{App, AppBuilder, ContractWrapper, Executor};
+use cw_multi_test::{App, AppBuilder, ContractWrapper, Executor, WasmSudo};
 use my_collection_manager::{
-    contract::{execute, instantiate, query, reply},
-    msg::{ExecuteMsg, InstantiateMsg, PaymentParams},
+    contract::{execute, instantiate, query, reply, sudo},
+    msg::{ExecuteMsg, GetPaymentParamsResponse, InstantiateMsg, PaymentParams, QueryMsg, SudoMsg},
 };
 use my_nameservice::{
     contract::{
@@ -49,7 +49,11 @@ fn instantiate_collection_manager(
     mock_app: &mut App,
     payment_params: PaymentParams,
 ) -> (u64, Addr) {
-    let code = Box::new(ContractWrapper::new(execute, instantiate, query).with_reply(reply));
+    let code = Box::new(
+        ContractWrapper::new(execute, instantiate, query)
+            .with_reply(reply)
+            .with_sudo(sudo),
+    );
     let manager_code_id = mock_app.store_code(code);
 
     return (
@@ -343,6 +347,54 @@ fn test_mint_num_tokens() {
         OwnerOfResponse {
             owner: owner_addr.to_string(),
             approvals: vec![],
+        }
+    );
+}
+
+#[test]
+fn test_sudo_update_payment_params() {
+    // Arrange
+    let mut mock_app = App::default();
+    let beneficiary_addr = Addr::unchecked("beneficiary");
+    let (_, addr_manager) = instantiate_collection_manager(
+        &mut mock_app,
+        PaymentParams {
+            beneficiary: beneficiary_addr.to_owned(),
+            mint_price: None,
+        },
+    );
+    let new_payment_params = PaymentParams {
+        beneficiary: beneficiary_addr.to_owned(),
+        mint_price: Some(Coin {
+            denom: "silver".to_owned(),
+            amount: Uint128::from(23u16),
+        }),
+    };
+    let update_sudo_msg = SudoMsg::UpdatePaymentParams(new_payment_params.to_owned());
+    let sudo_msg = cw_multi_test::SudoMsg::Wasm(
+        WasmSudo::new(&addr_manager, &update_sudo_msg).expect("Failed to serialize sudo message"),
+    );
+
+    // Act
+    let result = mock_app.sudo(sudo_msg);
+
+    // Assert
+    assert!(result.is_ok(), "Failed to pass through the message");
+    let result = result.unwrap();
+    let expected_sudo_event = Event::new("wasm-my-collection-manager")
+        .add_attribute("_contract_address", addr_manager.to_owned())
+        .add_attribute("update-payment-params-beneficiary", beneficiary_addr)
+        .add_attribute("update-payment-params-mint-price-denom", "silver")
+        .add_attribute("update-payment-params-mint-price-amount", "23");
+    result.assert_event(&expected_sudo_event);
+    let result = mock_app
+        .wrap()
+        .query_wasm_smart::<GetPaymentParamsResponse>(&addr_manager, &QueryMsg::GetPaymentParams);
+    assert!(result.is_ok(), "Failed to query payment params");
+    assert_eq!(
+        result.unwrap(),
+        GetPaymentParamsResponse {
+            payment_params: new_payment_params
         }
     );
 }

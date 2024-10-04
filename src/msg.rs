@@ -51,3 +51,8 @@ pub enum QueryMsg {
 pub struct GetPaymentParamsResponse {
     pub payment_params: PaymentParams,
 }
+
+#[cw_serde]
+pub enum SudoMsg {
+    UpdatePaymentParams(PaymentParams),
+}

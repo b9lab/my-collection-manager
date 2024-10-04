@@ -2,7 +2,7 @@ use crate::{
     error::ContractError,
     msg::{
         CollectionExecuteMsg, CollectionQueryMsg, ExecuteMsg, GetPaymentParamsResponse,
-        InstantiateMsg, NameServiceExecuteMsgResponse, QueryMsg,
+        InstantiateMsg, NameServiceExecuteMsgResponse, PaymentParams, QueryMsg, SudoMsg,
     },
     state::PAYMENT_PARAMS,
 };
@@ -36,7 +36,9 @@ impl TryFrom<u64> for ReplyCode {
 pub fn instantiate(deps: DepsMut, _: Env, _: MessageInfo, msg: InstantiateMsg) -> ContractResult {
     msg.payment_params.validate()?;
     PAYMENT_PARAMS.save(deps.storage, &msg.payment_params)?;
-    Ok(Response::default())
+    let instantiate_event = Event::new("my-collection-manager");
+    let instantiate_event = append_payment_params_attributes(instantiate_event, msg.payment_params);
+    Ok(Response::default().add_event(instantiate_event))
 }
 
 #[cfg_attr(not(feature = "library"), entry_point)]
@@ -187,14 +189,48 @@ pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> Result<QueryResponse, Cont
     }
 }
 
+#[cfg_attr(not(feature = "library"), entry_point)]
+pub fn sudo(deps: DepsMut, _env: Env, msg: SudoMsg) -> ContractResult {
+    match msg {
+        SudoMsg::UpdatePaymentParams(payment_params) => {
+            sudo_update_payment_params(deps, payment_params)
+        }
+    }
+}
+
+fn sudo_update_payment_params(deps: DepsMut, payment_params: PaymentParams) -> ContractResult {
+    payment_params.validate()?;
+    PAYMENT_PARAMS.save(deps.storage, &payment_params)?;
+    let sudo_event = Event::new("my-collection-manager");
+    let sudo_event = append_payment_params_attributes(sudo_event, payment_params);
+    Ok(Response::default().add_event(sudo_event))
+}
+
+fn append_payment_params_attributes(my_event: Event, payment_params: PaymentParams) -> Event {
+    let my_event = my_event.add_attribute(
+        "update-payment-params-beneficiary",
+        payment_params.beneficiary,
+    );
+    match payment_params.mint_price {
+        None => my_event.add_attribute("update-payment-params-mint-price", "none"),
+        Some(mint_price) => my_event
+            .add_attribute("update-payment-params-mint-price-denom", mint_price.denom)
+            .add_attribute(
+                "update-payment-params-mint-price-amount",
+                mint_price.amount.to_string(),
+            ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{
         contract::ReplyCode,
         msg::{
             CollectionExecuteMsg, CollectionQueryMsg, ExecuteMsg, InstantiateMsg,
-            NameServiceExecuteMsgResponse, PaymentParams,
+            NameServiceExecuteMsgResponse, PaymentParams, SudoMsg,
         },
+        state::PAYMENT_PARAMS,
     };
     use cosmwasm_std::{
         from_json,
@@ -454,5 +490,39 @@ mod tests {
         let expected_response = Response::default()
             .add_event(Event::new("my-collection-manager").add_attribute("token-count-after", "4"));
         assert_eq!(received_response, expected_response);
+    }
+
+    #[test]
+    fn test_sudo_update_payment_params() {
+        // Arrange
+        let mut mocked_deps_mut = testing::mock_dependencies();
+        let mocked_env = testing::mock_env();
+        let beneficiary = Addr::unchecked("beneficiary");
+        let new_payment_params = PaymentParams {
+            beneficiary: beneficiary.to_owned(),
+            mint_price: Some(Coin {
+                denom: "silver".to_owned(),
+                amount: Uint128::one(),
+            }),
+        };
+        let sudo_msg = SudoMsg::UpdatePaymentParams(new_payment_params.to_owned());
+
+        // Act
+        let contract_result = super::sudo(mocked_deps_mut.as_mut(), mocked_env, sudo_msg);
+
+        // Assert
+        assert!(contract_result.is_ok(), "Failed to sudo");
+        let received_response = contract_result.unwrap();
+        let expected_response = Response::default().add_event(
+            Event::new("my-collection-manager")
+                .add_attribute("update-payment-params-beneficiary", beneficiary)
+                .add_attribute("update-payment-params-mint-price-denom", "silver")
+                .add_attribute("update-payment-params-mint-price-amount", "1"),
+        );
+        assert_eq!(received_response, expected_response);
+        let payment_params = PAYMENT_PARAMS
+            .load(&mocked_deps_mut.storage)
+            .expect("Failed to load payment params");
+        assert_eq!(payment_params, new_payment_params);
     }
 }
