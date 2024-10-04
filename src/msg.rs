@@ -1,4 +1,4 @@
-use cosmwasm_schema::cw_serde;
+use cosmwasm_schema::{cw_serde, QueryResponses};
 use cosmwasm_std::{Addr, Coin, Empty, Uint128};
 use cw721::msg::{Cw721ExecuteMsg, Cw721QueryMsg};
 
@@ -38,4 +38,16 @@ pub enum ExecuteMsg {
 #[cw_serde]
 pub struct NameServiceExecuteMsgResponse {
     pub num_tokens: u64,
+}
+
+#[cw_serde]
+#[derive(QueryResponses)]
+pub enum QueryMsg {
+    #[returns(GetPaymentParamsResponse)]
+    GetPaymentParams,
+}
+
+#[cw_serde]
+pub struct GetPaymentParamsResponse {
+    pub payment_params: PaymentParams,
 }

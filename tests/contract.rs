@@ -1,8 +1,8 @@
-use cosmwasm_std::{to_json_binary, Addr, Coin, Empty, Event, Uint128};
+use cosmwasm_std::{Addr, Coin, Empty, Event, Uint128};
 use cw721::msg::{Cw721ExecuteMsg, Cw721QueryMsg, OwnerOfResponse};
 use cw_multi_test::{App, AppBuilder, ContractWrapper, Executor};
 use my_collection_manager::{
-    contract::{execute, instantiate, reply},
+    contract::{execute, instantiate, query, reply},
     msg::{ExecuteMsg, InstantiateMsg, PaymentParams},
 };
 use my_nameservice::{
@@ -49,12 +49,7 @@ fn instantiate_collection_manager(
     mock_app: &mut App,
     payment_params: PaymentParams,
 ) -> (u64, Addr) {
-    let code = Box::new(
-        ContractWrapper::new(execute, instantiate, |_, _, _: ()| {
-            to_json_binary("mocked_manager_query")
-        })
-        .with_reply(reply),
-    );
+    let code = Box::new(ContractWrapper::new(execute, instantiate, query).with_reply(reply));
     let manager_code_id = mock_app.store_code(code);
 
     return (

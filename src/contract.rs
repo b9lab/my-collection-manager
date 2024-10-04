@@ -1,16 +1,17 @@
 use crate::{
     error::ContractError,
     msg::{
-        CollectionExecuteMsg, CollectionQueryMsg, ExecuteMsg, InstantiateMsg,
-        NameServiceExecuteMsgResponse,
+        CollectionExecuteMsg, CollectionQueryMsg, ExecuteMsg, GetPaymentParamsResponse,
+        InstantiateMsg, NameServiceExecuteMsgResponse, QueryMsg,
     },
     state::PAYMENT_PARAMS,
 };
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
 use cosmwasm_std::{
-    from_json, to_json_binary, BankMsg, Coin, CosmosMsg, DepsMut, Empty, Env, Event, MessageInfo,
-    QueryRequest, Reply, ReplyOn, Response, StdError, SubMsg, Uint128, WasmMsg, WasmQuery,
+    from_json, to_json_binary, BankMsg, Coin, CosmosMsg, Deps, DepsMut, Empty, Env, Event,
+    MessageInfo, QueryRequest, QueryResponse, Reply, ReplyOn, Response, StdError, SubMsg, Uint128,
+    WasmMsg, WasmQuery,
 };
 use cw721::msg::NumTokensResponse;
 
@@ -175,6 +176,15 @@ fn reply_pass_through(_deps: DepsMut, _env: Env, msg: Reply) -> ContractResult {
     let event = Event::new("my-collection-manager")
         .add_attribute("token-count-after", value.num_tokens.to_string());
     Ok(Response::default().add_event(event))
+}
+
+#[cfg_attr(not(feature = "library"), entry_point)]
+pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> Result<QueryResponse, ContractError> {
+    match msg {
+        QueryMsg::GetPaymentParams {} => Ok(to_json_binary(&GetPaymentParamsResponse {
+            payment_params: PAYMENT_PARAMS.load(deps.storage)?,
+        })?),
+    }
 }
 
 #[cfg(test)]
