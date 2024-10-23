@@ -23,3 +23,4 @@ Branches:
 * [`initial-pass-through`](../../tree/initial-pass-through)
 * [`cross-contract-query`](../../tree/cross-contract-query), [diff](../../compare/initial-pass-through..cross-contract-query)
 * [`reply-from-execute`](../../tree/reply-from-execute), [diff](../../compare/cross-contract-query..reply-from-execute)
+* [`cross-module-message`](../../tree/cross-module-message), [diff](../../compare/reply-from-execute..cross-module-message)
