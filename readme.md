@@ -21,3 +21,4 @@ Versions used here are:
 Branches:
 
 * [`initial-pass-through`](../../tree/initial-pass-through)
+* [`cross-contract-query`](../../tree/cross-contract-query), [diff](../../compare/initial-pass-through..cross-contract-query)
