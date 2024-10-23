@@ -26,3 +26,4 @@ Branches:
 * [`cross-module-message`](../../tree/cross-module-message), [diff](../../compare/reply-from-execute..cross-module-message)
 * [`proper-fund-handling`](../../tree/proper-fund-handling), [diff](../../compare/cross-module-message..proper-fund-handling)
 * [`payment-params-query`](../../tree/payment-params-query), [diff](../../compare/proper-fund-handling..payment-params-query)
+* [`sudo-message`](../../tree/sudo-message), [diff](../../compare/payment-params-query..sudo-message)
