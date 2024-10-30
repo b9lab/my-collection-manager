@@ -2,9 +2,10 @@ use crate::{
     error::ContractError,
     msg::{
         CollectionExecuteMsg, CollectionQueryMsg, ExecuteMsg, GetPaymentParamsResponse,
-        InstantiateMsg, NameServiceExecuteMsgResponse, PaymentParams, QueryMsg, SudoMsg,
+        InstantiateMsg, MigrateMsg, NameServiceExecuteMsgResponse, PaymentParams, QueryMsg,
+        SudoMsg,
     },
-    state::PAYMENT_PARAMS,
+    state::{CONTRACT_NAME, CONTRACT_VERSION, PAYMENT_PARAMS},
 };
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
@@ -13,6 +14,7 @@ use cosmwasm_std::{
     MessageInfo, QueryRequest, QueryResponse, Reply, ReplyOn, Response, StdError, SubMsg, Uint128,
     WasmMsg, WasmQuery,
 };
+use cw2::{get_contract_version, set_contract_version, ContractVersion, VersionError};
 use cw721::msg::NumTokensResponse;
 
 type ContractResult = Result<Response, ContractError>;
@@ -36,7 +38,9 @@ impl TryFrom<u64> for ReplyCode {
 pub fn instantiate(deps: DepsMut, _: Env, _: MessageInfo, msg: InstantiateMsg) -> ContractResult {
     msg.payment_params.validate()?;
     PAYMENT_PARAMS.save(deps.storage, &msg.payment_params)?;
-    let instantiate_event = Event::new("my-collection-manager");
+    set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
+    let instantiate_event = Event::new("my-collection-manager")
+        .add_attribute("update-contract-version", CONTRACT_VERSION);
     let instantiate_event = append_payment_params_attributes(instantiate_event, msg.payment_params);
     Ok(Response::default().add_event(instantiate_event))
 }
@@ -206,6 +210,27 @@ fn sudo_update_payment_params(deps: DepsMut, payment_params: PaymentParams) -> C
     Ok(Response::default().add_event(sudo_event))
 }
 
+#[cfg_attr(not(feature = "library"), entry_point)]
+pub fn migrate(deps: DepsMut, _env: Env, msg: MigrateMsg) -> ContractResult {
+    if let Ok(ContractVersion {
+        contract: _,
+        version,
+    }) = get_contract_version(deps.storage)
+    {
+        return Err(ContractError::Version(VersionError::WrongVersion {
+            expected: "0.0.0".to_owned(),
+            found: version,
+        }));
+    }
+    msg.payment_params.validate()?;
+    PAYMENT_PARAMS.save(deps.storage, &msg.payment_params)?;
+    set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
+    let migrate_event = Event::new("my-collection-manager")
+        .add_attribute("update-contract-version", CONTRACT_VERSION);
+    let migrate_event = append_payment_params_attributes(migrate_event, msg.payment_params);
+    Ok(Response::default().add_event(migrate_event))
+}
+
 fn append_payment_params_attributes(my_event: Event, payment_params: PaymentParams) -> Event {
     let my_event = my_event.add_attribute(
         "update-payment-params-beneficiary",
@@ -227,7 +252,7 @@ mod tests {
     use crate::{
         contract::ReplyCode,
         msg::{
-            CollectionExecuteMsg, CollectionQueryMsg, ExecuteMsg, InstantiateMsg,
+            CollectionExecuteMsg, CollectionQueryMsg, ExecuteMsg, InstantiateMsg, MigrateMsg,
             NameServiceExecuteMsgResponse, PaymentParams, SudoMsg,
         },
         state::PAYMENT_PARAMS,
@@ -239,6 +264,7 @@ mod tests {
         OwnedDeps, Querier, QuerierResult, QueryRequest, Reply, ReplyOn, Response, SubMsg,
         SubMsgResponse, SubMsgResult, SystemError, SystemResult, Uint128, WasmMsg, WasmQuery,
     };
+    use cw2::{assert_contract_version, ContractVersion};
     use cw721::msg::NumTokensResponse;
     use std::marker::PhantomData;
 
@@ -296,6 +322,57 @@ mod tests {
         pub fn new(base: MockQuerier<Empty>, response: NumTokensResponse) -> Self {
             NumTokensMockQuerier { base, response }
         }
+    }
+
+    #[test]
+    fn test_instantiate() {
+        // Arrange
+        let mut mocked_deps_mut = mock_deps(NumTokensResponse { count: 3 });
+        let mocked_env = testing::mock_env();
+        let deployer = Addr::unchecked("deployer");
+        let mocked_msg_info = testing::mock_info(deployer.as_ref(), &[]);
+        let payment_params = PaymentParams {
+            beneficiary: deployer.to_owned(),
+            mint_price: None,
+        };
+        let instantiate_msg = InstantiateMsg {
+            payment_params: payment_params.to_owned(),
+        };
+
+        // Act
+        let result = super::instantiate(
+            mocked_deps_mut.as_mut(),
+            mocked_env.to_owned(),
+            mocked_msg_info,
+            instantiate_msg.to_owned(),
+        );
+
+        // Assert
+        assert!(result.is_ok(), "Failed to instantiate manager");
+        let received_response = result.unwrap();
+        let expected_response = Response::default().add_event(
+            Event::new("my-collection-manager")
+                .add_attribute("update-contract-version", "0.1.0")
+                .add_attribute("update-payment-params-beneficiary", deployer)
+                .add_attribute("update-payment-params-mint-price", "none"),
+        );
+        assert_eq!(received_response, expected_response);
+        let saved_payment_params = PAYMENT_PARAMS
+            .load(&mocked_deps_mut.storage)
+            .expect("Failed to load payment params");
+        assert_eq!(saved_payment_params, payment_params);
+        assert_contract_version(&mocked_deps_mut.storage, "my-collection-manager", "0.1.0")
+            .expect("Failed to assert contract version");
+        let contract_info = cw2::CONTRACT
+            .load(&mocked_deps_mut.storage)
+            .expect("Failed to load contract info");
+        assert_eq!(
+            contract_info,
+            ContractVersion {
+                contract: "my-collection-manager".to_owned(),
+                version: "0.1.0".to_owned(),
+            }
+        );
     }
 
     #[test]
@@ -524,5 +601,54 @@ mod tests {
             .load(&mocked_deps_mut.storage)
             .expect("Failed to load payment params");
         assert_eq!(payment_params, new_payment_params);
+    }
+
+    #[test]
+    fn test_migrate_payment_params() {
+        // Arrange
+        let mut mocked_deps_mut = testing::mock_dependencies();
+        let mocked_env = testing::mock_env();
+        let beneficiary = Addr::unchecked("beneficiary");
+        let new_payment_params = PaymentParams {
+            beneficiary: beneficiary.to_owned(),
+            mint_price: Some(Coin {
+                denom: "silver".to_owned(),
+                amount: Uint128::one(),
+            }),
+        };
+        let migrate_msg = MigrateMsg {
+            payment_params: new_payment_params.to_owned(),
+        };
+
+        // Act
+        let result = super::migrate(mocked_deps_mut.as_mut(), mocked_env, migrate_msg);
+
+        // Assert
+        assert!(result.is_ok(), "Failed to migrate manager");
+        let received_response = result.unwrap();
+        let expected_response = Response::default().add_event(
+            Event::new("my-collection-manager")
+                .add_attribute("update-contract-version", "0.1.0")
+                .add_attribute("update-payment-params-beneficiary", beneficiary)
+                .add_attribute("update-payment-params-mint-price-denom", "silver")
+                .add_attribute("update-payment-params-mint-price-amount", "1"),
+        );
+        assert_eq!(received_response, expected_response);
+        let saved_payment_params = PAYMENT_PARAMS
+            .load(&mocked_deps_mut.storage)
+            .expect("Failed to load payment params");
+        assert_eq!(new_payment_params, saved_payment_params);
+        assert_contract_version(&mocked_deps_mut.storage, "my-collection-manager", "0.1.0")
+            .expect("Failed to assert contract version");
+        let contract_info = cw2::CONTRACT
+            .load(&mocked_deps_mut.storage)
+            .expect("Failed to load contract info");
+        assert_eq!(
+            contract_info,
+            ContractVersion {
+                contract: "my-collection-manager".to_owned(),
+                version: "0.1.0".to_owned(),
+            }
+        );
     }
 }

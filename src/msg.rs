@@ -56,3 +56,8 @@ pub struct GetPaymentParamsResponse {
 pub enum SudoMsg {
     UpdatePaymentParams(PaymentParams),
 }
+
+#[cw_serde]
+pub struct MigrateMsg {
+    pub payment_params: PaymentParams,
+}
